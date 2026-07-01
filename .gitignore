@@ -1,0 +1,18 @@
+# Собранные бинарники
+/skillmap.exe
+/skillmap_mac
+/skillmap_linux
+/dist/
+
+# Данные, которые приложение генерирует при запуске
+cache_*.json
+*_навыки.xlsx
+
+# Go
+*.test
+*.out
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
