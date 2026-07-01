@@ -12,6 +12,7 @@ const (
 	excelEvenFill   = "DCE6F1"
 	excelSkillWidth = 25.0
 	excelColWidth   = 15.0
+	excelTopSkills  = 20
 )
 
 // excelFileName — имя итогового отчёта для города (см. ТЗ, шаг 5).
@@ -58,6 +59,9 @@ func GenerateExcel(cache *CacheData, professions []string) error {
 	f.DeleteSheet("Sheet1")
 
 	skills := aggregateSkills(cache.Data)
+	if len(skills) > excelTopSkills {
+		skills = skills[:excelTopSkills]
+	}
 	lastCol, err := excelize.ColumnNumberToName(len(professions) + 1)
 	if err != nil {
 		return err
