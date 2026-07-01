@@ -13,9 +13,6 @@ cache_*.json
 *.test
 *.out
 
-# Локальный ручной тест против живого hh.ru (не для CI/коммита)
-api_diag_test.go
-
 # OS / IDE
 .DS_Store
 .idea/
