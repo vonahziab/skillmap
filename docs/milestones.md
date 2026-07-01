@@ -7,7 +7,7 @@ Roadmap проекта. Каждый milestone закрывается рабоч
 
 | # | Milestone | Статус | Зависит от |
 |---|---|---|---|
-| 1 | [Каркас проекта](#milestone-1--каркас-проекта) | ⬜ Not started | — |
+| 1 | [Каркас проекта](#milestone-1--каркас-проекта) | ✅ Done | — |
 | 2 | [Работа с hh.ru API](#milestone-2--работа-с-hhru-api) | ⬜ Not started | M1 |
 | 3 | [CLI-диалог с пользователем](#milestone-3--cli-диалог-с-пользователем) | ⬜ Not started | M2 |
 | 4 | [Кэширование](#milestone-4--кэширование) | ⬜ Not started | M2 |
@@ -26,11 +26,11 @@ M3, M4, M5, M6 не зависят друг от друга напрямую и 
 
 **Цель:** рабочий скелет репозитория, который собирается в бинарник под три ОС.
 
-- [ ] Инициализация `go.mod`, структура файлов (`main.go`, `api.go`, `cache.go`, `excel.go`, `progress.go`)
-- [ ] Подключить `github.com/xuri/excelize/v2`
-- [ ] README.md + LICENSE (MIT)
-- [ ] Приветственное окно-баннер при запуске
-- [ ] Сборка под Windows/Mac/Linux (`GOOS`/`GOARCH`, `-ldflags "-s -w"`)
+- [x] Инициализация `go.mod`, структура файлов (`main.go`, `api.go`, `cache.go`, `excel.go`, `progress.go`)
+- [x] Подключить `github.com/xuri/excelize/v2`
+- [x] README.md + LICENSE (MIT)
+- [x] Приветственное окно-баннер при запуске
+- [x] Сборка под Windows/Mac/Linux (`GOOS`/`GOARCH`, `-ldflags "-s -w"`)
 
 **Результат:** `go build` проходит на всех трёх платформах, бинарник печатает баннер и завершается.
 
