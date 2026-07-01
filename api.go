@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -36,9 +38,25 @@ const (
 	retryPause   = 2 * time.Second
 	maxRedirects = 5
 
+	// captchaBackoff — пауза перед повтором, когда hh.ru вместо страницы
+	// отдаёт капчу (hhcaptcha.isBot=true в HH-Lux-InitialState). Такая
+	// блокировка держится значительно дольше, чем обычная сетевая ошибка,
+	// поэтому retryPause (2с) её не переживает.
+	captchaBackoff = 45 * time.Second
+
 	vacanciesPerPage = 100
 	searchPeriodDays = 30
 )
+
+// errCaptchaBlocked — hh.ru распознал клиента как бота и вместо страницы
+// вернул капчу (HTTP 200, но без реального содержимого).
+var errCaptchaBlocked = errors.New("hh.ru отдал капчу вместо страницы (бот-детект)")
+
+// isCaptchaBlocked проверяет сырое тело HTML-страницы на признак капчи —
+// поле "hhcaptcha":{"isBot":true,...} во встроенном JSON-состоянии.
+func isCaptchaBlocked(body []byte) bool {
+	return bytes.Contains(body, []byte(`"hhcaptcha"`)) && bytes.Contains(body, []byte(`"isBot":true`))
+}
 
 // Client — HTTP-клиент к hh.ru: JSON API для поиска города,
 // HTML-страницы сайта для списка вакансий и деталей (см. константы выше).
@@ -62,9 +80,11 @@ func NewClient() *Client {
 	}}
 }
 
-// withRetry — общая retry-обёртка: maxRetries попыток с паузой retryPause
-// между ними, пауза requestPause после каждого запроса независимо от исхода.
-// Каждая неудачная попытка увеличивает c.Retries (см. progress.go).
+// withRetry — общая retry-обёртка: maxRetries попыток между ними, пауза
+// requestPause после каждого запроса независимо от исхода. Каждая неудачная
+// попытка увеличивает c.Retries (см. progress.go). При капче (errCaptchaBlocked)
+// пауза перед повтором — captchaBackoff вместо обычной retryPause, так как
+// бот-блокировка hh.ru держится намного дольше сетевого сбоя.
 func (c *Client) withRetry(fetchOnce func() ([]byte, error)) ([]byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -76,7 +96,11 @@ func (c *Client) withRetry(fetchOnce func() ([]byte, error)) ([]byte, error) {
 		lastErr = err
 		c.Retries++
 		if attempt < maxRetries {
-			time.Sleep(retryPause)
+			if errors.Is(err, errCaptchaBlocked) {
+				time.Sleep(captchaBackoff)
+			} else {
+				time.Sleep(retryPause)
+			}
 		}
 	}
 	time.Sleep(requestPause)
@@ -164,6 +188,9 @@ func (c *Client) doHTMLFetch(startURL string) ([]byte, error) {
 		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("unexpected status %d for %s: %s", resp.StatusCode, currentURL, strings.TrimSpace(string(body)))
+		}
+		if isCaptchaBlocked(body) {
+			return nil, errCaptchaBlocked
 		}
 		return body, nil
 	}
