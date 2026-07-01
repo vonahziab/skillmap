@@ -26,18 +26,73 @@ func main() {
 	area := promptCity(client, reader)
 	fmt.Println()
 
-	cache, err := LoadCache(area.Name)
+	cache, err := LoadCache(area.Name, area.ID)
 	if err != nil {
 		fmt.Printf("Не удалось прочитать кэш: %v\n", err)
 		cache = nil
 	}
 
-	startFrom := professions[0]
-	if cache != nil {
-		startFrom = promptCacheDecision(cache, reader)
+	if cache != nil && !promptContinueCache(cache, reader) {
+		cache = nil
 	}
 
-	fmt.Printf("\nНачинаем сбор данных с профессии: %s\n", startFrom)
+	if err := collectSkills(client, area, cache, reader); err != nil {
+		fmt.Printf("Ошибка сбора данных: %v\n", err)
+		return
+	}
+}
+
+// collectSkills проходит по фиксированному списку профессий, пропуская уже
+// завершённые (из кэша), собирает счётчики навыков по вакансиям и
+// сохраняет кэш на диск сразу после каждой профессии (см. ТЗ, шаг 4;
+// ADR-0004). Прогресс-бар и итоговая статистика — предмет milestone 5/7,
+// здесь только сбор и чекпоинты.
+func collectSkills(client *Client, area Area, cache *CacheData, reader *bufio.Scanner) error {
+	if cache == nil {
+		cache = NewCache(area.Name, area.ID)
+	}
+
+	done := make(map[string]bool, len(cache.Completed))
+	for _, p := range cache.Completed {
+		done[p] = true
+	}
+
+	for _, profession := range professions {
+		if done[profession] {
+			continue
+		}
+
+		fmt.Printf("\n=== %s ===\n", profession)
+
+		vacancies, err := client.ListVacancies(profession, area.ID)
+		if err != nil {
+			fmt.Printf("Ошибка получения списка вакансий: %v (профессия пропущена)\n", err)
+			continue
+		}
+		if len(vacancies) == 0 {
+			fmt.Println("Вакансий не найдено за период.")
+		}
+
+		skills := make(map[string]int)
+		for _, v := range vacancies {
+			names, err := client.VacancyKeySkills(v.ID)
+			if err != nil {
+				fmt.Printf("  Пропуск вакансии %s (%s): %v\n", v.ID, v.Name, err)
+				continue
+			}
+			for _, s := range names {
+				skills[s]++
+			}
+		}
+
+		if err := cache.MarkCompleted(profession, skills); err != nil {
+			return fmt.Errorf("сохранить кэш после %q: %w", profession, err)
+		}
+		fmt.Printf("Собрано навыков: %d уникальных (вакансий: %d)\n", len(skills), len(vacancies))
+	}
+
+	fmt.Println("\nСбор данных завершён.")
+	return nil
 }
 
 // promptCity запрашивает у пользователя город, пока не будет однозначно
@@ -75,10 +130,11 @@ func promptCity(client *Client, reader *bufio.Scanner) Area {
 	}
 }
 
-// promptCacheDecision показывает найденный кэш и спрашивает, продолжить
+// promptContinueCache показывает найденный кэш и спрашивает, продолжить
 // сбор с последней незавершённой профессии или начать заново (см. ТЗ, шаг 3).
-// Возвращает профессию, с которой нужно начинать сбор.
-func promptCacheDecision(cache *CacheData, reader *bufio.Scanner) string {
+// Возвращает true, если нужно продолжать с существующим кэшем; false, если
+// пользователь выбрал начать заново (тогда кэш отбрасывается вызывающим кодом).
+func promptContinueCache(cache *CacheData, reader *bufio.Scanner) bool {
 	next := cache.NextProfession(professions)
 
 	fmt.Printf("Найден кэш от %s (собрано %d/%d профессий)\n",
@@ -96,10 +152,7 @@ func promptCacheDecision(cache *CacheData, reader *bufio.Scanner) string {
 			fmt.Println("Некорректный выбор, попробуйте снова.")
 			continue
 		}
-		if idx == 0 {
-			return next
-		}
-		return professions[0]
+		return idx == 0
 	}
 }
 
