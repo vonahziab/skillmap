@@ -1,6 +1,6 @@
 BINARY := skillmap
 
-.PHONY: build build-windows build-mac build-linux run test tidy clean
+.PHONY: build build-windows build-mac build-linux run test diag tidy clean
 
 build: build-windows
 
@@ -18,6 +18,9 @@ run:
 
 test:
 	go test ./...
+
+diag:
+	go test -tags manual -run TestDiagAPI -v .
 
 tidy:
 	go mod tidy

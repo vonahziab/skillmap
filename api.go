@@ -3,48 +3,68 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	apiBaseURL = "https://api.hh.ru"
-	userAgent  = "SkillMap/1.0 (github.com/vonahziab/skillmap)"
+	// api.hh.ru отдаёт /suggests/areas без ограничений — используется как есть.
+	apiBaseURL   = "https://api.hh.ru"
+	apiUserAgent = "SkillMap/1.0 (github.com/vonahziab/skillmap)"
+
+	// /vacancies и /vacancies/<id> на api.hh.ru блокируются DDoS-Guard даже
+	// анонимно с валидными заголовками (проверено вручную и curl, и Go-клиентом
+	// с разных сетей). Рабочий путь — обычные HTML-страницы сайта с браузерным
+	// User-Agent и извлечением встроенного JSON-состояния страницы
+	// (см. ADR-0003). Тот же приём используют актуальные скрейперы hh.ru,
+	// например github.com/LuaSavage/hh_ru_parser.
+	htmlSearchURL     = "https://hh.ru/search/vacancy"
+	htmlVacancyURLFmt = "https://hh.ru/vacancy/%s"
+	browserUserAgent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 
 	requestTimeout = 10 * time.Second
 	requestPause   = 400 * time.Millisecond
 
-	maxRetries = 3
-	retryPause = 2 * time.Second
+	maxRetries   = 3
+	retryPause   = 2 * time.Second
+	maxRedirects = 5
 
 	vacanciesPerPage = 100
+	searchPeriodDays = 30
 )
 
-// Client — HTTP-клиент к публичному API hh.ru.
+// Client — HTTP-клиент к hh.ru: JSON API для поиска города,
+// HTML-страницы сайта для списка вакансий и деталей (см. константы выше).
 type Client struct {
 	http *http.Client
 }
 
 func NewClient() *Client {
-	return &Client{http: &http.Client{Timeout: requestTimeout}}
+	jar, _ := cookiejar.New(nil)
+	return &Client{http: &http.Client{
+		Timeout: requestTimeout,
+		Jar:     jar,
+		// Редиректы (например hh.ru → <регион>.hh.ru) обрабатываются вручную
+		// в doHTMLFetch, чтобы гарантированно переносить заголовки на каждый хоп.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}}
 }
 
-// get выполняет GET-запрос с retry (maxRetries попыток, пауза retryPause
-// между ними) и выдерживает паузу requestPause после каждого запроса,
-// независимо от исхода, чтобы не превышать rate-limit анонимного API.
-func (c *Client) get(path string, query url.Values) ([]byte, error) {
-	reqURL := apiBaseURL + path
-	if len(query) > 0 {
-		reqURL += "?" + query.Encode()
-	}
-
+// withRetry — общая retry-обёртка: maxRetries попыток с паузой retryPause
+// между ними, пауза requestPause после каждого запроса независимо от исхода.
+func withRetry(fetchOnce func() ([]byte, error)) ([]byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		body, err := c.doGet(reqURL)
+		body, err := fetchOnce()
 		if err == nil {
 			time.Sleep(requestPause)
 			return body, nil
@@ -55,15 +75,23 @@ func (c *Client) get(path string, query url.Values) ([]byte, error) {
 		}
 	}
 	time.Sleep(requestPause)
-	return nil, fmt.Errorf("hh.ru api request failed after %d attempts: %w", maxRetries, lastErr)
+	return nil, fmt.Errorf("hh.ru request failed after %d attempts: %w", maxRetries, lastErr)
 }
 
-func (c *Client) doGet(reqURL string) ([]byte, error) {
+func (c *Client) getJSON(path string, query url.Values) ([]byte, error) {
+	reqURL := apiBaseURL + path
+	if len(query) > 0 {
+		reqURL += "?" + query.Encode()
+	}
+	return withRetry(func() ([]byte, error) { return c.doJSONGet(reqURL) })
+}
+
+func (c *Client) doJSONGet(reqURL string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", apiUserAgent)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)
@@ -80,6 +108,95 @@ func (c *Client) doGet(reqURL string) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return body, nil
+}
+
+func (c *Client) getHTML(rawURL string) ([]byte, error) {
+	return withRetry(func() ([]byte, error) { return c.doHTMLFetch(rawURL) })
+}
+
+// doHTMLFetch запрашивает HTML-страницу сайта с браузерными заголовками,
+// вручную проходя редиректы (hh.ru часто переадресует на региональный
+// поддомен вида ufa.hh.ru) — так на каждом хопе точно сохраняются заголовки.
+func (c *Client) doHTMLFetch(startURL string) ([]byte, error) {
+	currentURL := startURL
+
+	for i := 0; i < maxRedirects; i++ {
+		req, err := http.NewRequest(http.MethodGet, currentURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", browserUserAgent)
+		req.Header.Set("Accept", "text/html,application/xhtml+xml")
+		req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9")
+
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			loc := resp.Header.Get("Location")
+			resp.Body.Close()
+			if loc == "" {
+				return nil, fmt.Errorf("redirect from %s without Location header", currentURL)
+			}
+			base, err := url.Parse(currentURL)
+			if err != nil {
+				return nil, err
+			}
+			next, err := base.Parse(loc)
+			if err != nil {
+				return nil, fmt.Errorf("parse redirect location: %w", err)
+			}
+			currentURL = next.String()
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("unexpected status %d for %s: %s", resp.StatusCode, currentURL, strings.TrimSpace(string(body)))
+		}
+		return body, nil
+	}
+	return nil, fmt.Errorf("too many redirects starting from %s", startURL)
+}
+
+// initialStateRe вытаскивает встроенный JSON-стейт страницы hh.ru —
+// тот же приём, что у github.com/LuaSavage/hh_ru_parser: обычный HTML-парсинг
+// DOM теряет часть вакансий, а этот JSON содержит полные данные так же,
+// как отдавал бы официальный JSON API.
+var initialStateRe = regexp.MustCompile(`(?s)<template[^>]*id="HH-Lux-InitialState"[^>]*>(.*?)</template>`)
+
+type initialState struct {
+	VacancySearchResult *struct {
+		Vacancies []struct {
+			VacancyID int    `json:"vacancyId"`
+			Name      string `json:"name"`
+		} `json:"vacancies"`
+	} `json:"vacancySearchResult"`
+	VacancyView *struct {
+		KeySkills struct {
+			KeySkill []string `json:"keySkill"`
+		} `json:"keySkills"`
+	} `json:"vacancyView"`
+}
+
+func parseInitialState(body []byte) (*initialState, error) {
+	m := initialStateRe.FindSubmatch(body)
+	if m == nil {
+		return nil, fmt.Errorf("HH-Lux-InitialState template not found on page")
+	}
+	raw := html.UnescapeString(string(m[1]))
+
+	var state initialState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return nil, fmt.Errorf("decode initial state: %w", err)
+	}
+	return &state, nil
 }
 
 // Area — результат поиска города через /suggests/areas.
@@ -101,7 +218,7 @@ type suggestAreasResponse struct {
 // SearchAreas ищет город по тексту. Возвращает 0, 1 или несколько
 // совпадений — выбор варианта обработки остаётся за вызывающим кодом.
 func (c *Client) SearchAreas(city string) ([]Area, error) {
-	body, err := c.get("/suggests/areas", url.Values{"text": {city}})
+	body, err := c.getJSON("/suggests/areas", url.Values{"text": {city}})
 	if err != nil {
 		return nil, err
 	}
@@ -132,69 +249,60 @@ type Vacancy struct {
 	Name string
 }
 
-type vacanciesResponse struct {
-	Items []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	} `json:"items"`
-	Found int `json:"found"`
-}
-
 // ListVacancies возвращает до 100 вакансий по профессии в заданном городе
-// за период от dateFrom (формат YYYY-MM-DD) до сегодня.
-func (c *Client) ListVacancies(profession, areaID, dateFrom string) ([]Vacancy, error) {
+// за последние searchPeriodDays дней, парся HTML-страницу поиска hh.ru.
+func (c *Client) ListVacancies(profession, areaID string) ([]Vacancy, error) {
 	query := url.Values{
-		"text":      {profession},
-		"area":      {areaID},
-		"date_from": {dateFrom},
-		"per_page":  {strconv.Itoa(vacanciesPerPage)},
+		"text":          {profession},
+		"area":          {areaID},
+		"items_on_page": {strconv.Itoa(vacanciesPerPage)},
+		"search_period": {strconv.Itoa(searchPeriodDays)},
 	}
+	reqURL := htmlSearchURL + "?" + query.Encode()
 
-	body, err := c.get("/vacancies", query)
+	body, err := c.getHTML(reqURL)
 	if err != nil {
 		return nil, err
 	}
 
-	var parsed vacanciesResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("decode vacancies response: %w", err)
+	state, err := parseInitialState(body)
+	if err != nil {
+		return nil, fmt.Errorf("parse search page: %w", err)
+	}
+	if state.VacancySearchResult == nil {
+		return nil, fmt.Errorf("search page has no vacancySearchResult")
 	}
 
-	vacancies := make([]Vacancy, 0, len(parsed.Items))
-	for _, item := range parsed.Items {
-		vacancies = append(vacancies, Vacancy{ID: item.ID, Name: item.Name})
+	vacancies := make([]Vacancy, 0, len(state.VacancySearchResult.Vacancies))
+	for _, v := range state.VacancySearchResult.Vacancies {
+		vacancies = append(vacancies, Vacancy{ID: strconv.Itoa(v.VacancyID), Name: v.Name})
 	}
 	return vacancies, nil
 }
 
-type vacancyDetailsResponse struct {
-	KeySkills []struct {
-		Name string `json:"name"`
-	} `json:"key_skills"`
-}
-
-// VacancyKeySkills возвращает названия ключевых навыков вакансии.
-// Пустой срез, если key_skills отсутствует — вызывающий код пропускает
-// такую вакансию молча (см. edge cases в ТЗ).
+// VacancyKeySkills возвращает названия ключевых навыков вакансии, парся
+// HTML-страницу вакансии hh.ru. Пустой срез, если навыки не указаны —
+// вызывающий код пропускает такую вакансию молча (см. edge cases в ТЗ).
 func (c *Client) VacancyKeySkills(vacancyID string) ([]string, error) {
-	body, err := c.get("/vacancies/"+vacancyID, nil)
+	reqURL := fmt.Sprintf(htmlVacancyURLFmt, vacancyID)
+
+	body, err := c.getHTML(reqURL)
 	if err != nil {
 		return nil, err
 	}
 
-	var parsed vacancyDetailsResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("decode vacancy details response: %w", err)
+	state, err := parseInitialState(body)
+	if err != nil {
+		return nil, fmt.Errorf("parse vacancy page: %w", err)
 	}
-
-	skills := make([]string, 0, len(parsed.KeySkills))
-	for _, s := range parsed.KeySkills {
-		skills = append(skills, s.Name)
+	if state.VacancyView == nil {
+		return nil, fmt.Errorf("vacancy page has no vacancyView")
 	}
-	return skills, nil
+	return state.VacancyView.KeySkills.KeySkill, nil
 }
 
-// DateFrom30DaysAgo — дата начала периода сбора (сегодня минус 30 дней).
+// DateFrom30DaysAgo — дата начала периода сбора (сегодня минус 30 дней),
+// используется только для отображения периода в итоговой статистике.
 func DateFrom30DaysAgo() string {
 	return time.Now().AddDate(0, 0, -30).Format("2006-01-02")
 }
