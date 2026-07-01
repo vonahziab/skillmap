@@ -43,11 +43,11 @@ func main() {
 		return
 	}
 
-	if err := GenerateExcel(cache, professions); err != nil {
+	if err := GenerateExcel(cache, professionGroups); err != nil {
 		fmt.Printf("Ошибка генерации Excel: %v\n", err)
 		return
 	}
-	reporter.Summary(len(aggregateSkills(cache.Data)), excelFileName(cache.City))
+	reporter.Summary(len(aggregateSkills(cache.Data, professions)), excelFileName(cache.City))
 }
 
 // collectSkills проходит по фиксированному списку профессий, пропуская уже

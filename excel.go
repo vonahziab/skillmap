@@ -20,14 +20,16 @@ func excelFileName(city string) string {
 	return fmt.Sprintf("%s_навыки.xlsx", city)
 }
 
-// aggregateSkills сводит counts по профессиям в единый список навыков,
-// отсортированный по убыванию суммы встречаемости (см. ADR-0007). При
-// равной сумме порядок стабилизируется по алфавиту, чтобы вывод не зависел
-// от порядка обхода map.
-func aggregateSkills(data map[string]map[string]int) []string {
+// aggregateSkills сводит counts по указанным профессиям в единый список
+// навыков, отсортированный по убыванию суммы встречаемости (см. ADR-0009).
+// Учитываются только профессии из professions — это позволяет строить топ
+// отдельно по каждой группе, не смешивая навыки разных миров. При равной
+// сумме порядок стабилизируется по алфавиту, чтобы вывод не зависел от
+// порядка обхода map.
+func aggregateSkills(data map[string]map[string]int, professions []string) []string {
 	totals := make(map[string]int)
-	for _, skills := range data {
-		for skill, count := range skills {
+	for _, profession := range professions {
+		for skill, count := range data[profession] {
 			totals[skill] += count
 		}
 	}
@@ -45,37 +47,60 @@ func aggregateSkills(data map[string]map[string]int) []string {
 	return skills
 }
 
-// GenerateExcel строит итоговый .xlsx с таблицей «навыки × профессии» для
-// города и сохраняет его как <город>_навыки.xlsx, перезаписывая
-// существующий файл (см. ТЗ, шаг 5).
-func GenerateExcel(cache *CacheData, professions []string) error {
+// GenerateExcel строит итоговый .xlsx для города: по одному листу на группу
+// профессий, у каждого свой топ навыков (см. ADR-0009). Сохраняет файл как
+// <город>_навыки.xlsx, перезаписывая существующий (см. ТЗ, шаг 5).
+func GenerateExcel(cache *CacheData, groups []professionGroup) error {
 	f := excelize.NewFile()
 	defer f.Close()
-
-	sheet := cache.City
-	if _, err := f.NewSheet(sheet); err != nil {
-		return fmt.Errorf("создать лист %q: %w", sheet, err)
-	}
-	f.DeleteSheet("Sheet1")
-
-	skills := aggregateSkills(cache.Data)
-	if len(skills) > excelTopSkills {
-		skills = skills[:excelTopSkills]
-	}
-	lastCol, err := excelize.ColumnNumberToName(len(professions) + 1)
-	if err != nil {
-		return err
-	}
 
 	styles, err := newExcelStyles(f)
 	if err != nil {
 		return err
 	}
 
-	if err := writeExcelHeader(f, sheet, cache.City, professions, lastCol, styles); err != nil {
+	for _, group := range groups {
+		if err := writeGroupSheet(f, cache, group, styles); err != nil {
+			return err
+		}
+	}
+
+	if len(groups) > 0 {
+		if idx, err := f.GetSheetIndex(groups[0].Name); err == nil {
+			f.DeleteSheet("Sheet1")
+			f.SetActiveSheet(idx)
+		}
+	}
+
+	if err := f.SaveAs(excelFileName(cache.City)); err != nil {
+		return fmt.Errorf("сохранить %s: %w", excelFileName(cache.City), err)
+	}
+	return nil
+}
+
+// writeGroupSheet заполняет один лист таблицей «навыки × профессии» для
+// группы: строки — топ навыков, посчитанный только по профессиям группы,
+// столбцы — профессии группы (см. ADR-0009).
+func writeGroupSheet(f *excelize.File, cache *CacheData, group professionGroup, styles excelStyles) error {
+	sheet := group.Name
+	if _, err := f.NewSheet(sheet); err != nil {
+		return fmt.Errorf("создать лист %q: %w", sheet, err)
+	}
+
+	skills := aggregateSkills(cache.Data, group.Members)
+	if len(skills) > excelTopSkills {
+		skills = skills[:excelTopSkills]
+	}
+	lastCol, err := excelize.ColumnNumberToName(len(group.Members) + 1)
+	if err != nil {
 		return err
 	}
-	if err := writeExcelRows(f, sheet, skills, professions, cache.Data, styles); err != nil {
+
+	title := fmt.Sprintf("%s — %s", cache.City, group.Name)
+	if err := writeExcelHeader(f, sheet, title, group.Members, lastCol, styles); err != nil {
+		return err
+	}
+	if err := writeExcelRows(f, sheet, skills, group.Members, cache.Data, styles); err != nil {
 		return err
 	}
 	if err := styleExcelColumns(f, sheet, lastCol); err != nil {
@@ -96,10 +121,6 @@ func GenerateExcel(cache *CacheData, professions []string) error {
 	orientation := "landscape"
 	if err := f.SetPageLayout(sheet, &excelize.PageLayoutOptions{Orientation: &orientation}); err != nil {
 		return fmt.Errorf("альбомная ориентация: %w", err)
-	}
-
-	if err := f.SaveAs(excelFileName(cache.City)); err != nil {
-		return fmt.Errorf("сохранить %s: %w", excelFileName(cache.City), err)
 	}
 	return nil
 }
