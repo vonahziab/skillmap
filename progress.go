@@ -22,8 +22,8 @@ type completedEntry struct {
 // Reporter отображает live-прогресс сбора в консоли: перерисовывает блок
 // целиком на месте (см. ТЗ, шаг 4), не оставляя мусора в истории терминала.
 type Reporter struct {
-	area  Area
-	total int
+	area   Area
+	total  int
 	client *Client
 
 	startTime time.Time
@@ -35,6 +35,14 @@ type Reporter struct {
 	currentVacTotal int
 	currentSkills   int
 	manualErrors    int
+
+	// errorLog — тексты пропусков/ошибок после исчерпания retry (ТЗ, шаг 6/
+	// раздел 10), выводятся отдельным списком в итоговой статистике (Summary),
+	// а не в live-блоке — иначе они ломали бы перерисовку блока на месте.
+	errorLog []string
+	// zeroResult — профессии, по которым не набралось ни одного навыка (см.
+	// ТЗ, раздел 10: 0 вакансий за период или все найденные без key_skills).
+	zeroResult []string
 
 	linesPrinted int
 }
@@ -49,6 +57,9 @@ func NewReporter(area Area, total int, client *Client) *Reporter {
 // из кэша при старте (без известного времени выполнения).
 func (r *Reporter) AddCompleted(profession string, skills int) {
 	r.completed = append(r.completed, completedEntry{Profession: profession, Skills: skills})
+	if skills == 0 {
+		r.zeroResult = append(r.zeroResult, profession)
+	}
 }
 
 // StartProfession отмечает начало сбора новой профессии и перерисовывает блок.
@@ -75,16 +86,21 @@ func (r *Reporter) VacancyProgress(vacancyIdx, skillsSoFar int) {
 	r.render()
 }
 
-// LogError увеличивает счётчик ошибок/пропусков (детальное логирование —
-// предмет milestone 7).
-func (r *Reporter) LogError(_ string) {
+// LogError увеличивает счётчик ошибок/пропусков и сохраняет текст записи
+// для итогового списка (Summary) — сам live-блок не печатает произвольный
+// текст, чтобы не ломать перерисовку на месте.
+func (r *Reporter) LogError(msg string) {
 	r.manualErrors++
+	r.errorLog = append(r.errorLog, msg)
 	r.render()
 }
 
 // FinishProfession переносит профессию из "текущей" в список завершённых.
 func (r *Reporter) FinishProfession(name string, skills int, duration time.Duration) {
 	r.completed = append(r.completed, completedEntry{Profession: name, Skills: skills, Duration: duration})
+	if skills == 0 {
+		r.zeroResult = append(r.zeroResult, name)
+	}
 	r.current = ""
 	r.render()
 }
@@ -93,6 +109,34 @@ func (r *Reporter) FinishProfession(name string, skills int, duration time.Durat
 func (r *Reporter) Done() {
 	r.render()
 	fmt.Println("\nСбор данных завершён.")
+}
+
+// Summary печатает итоговый экран статистики после генерации Excel (ТЗ,
+// milestone 7): сводку по городу, времени, ошибкам и профессиям без
+// результата, плюс список пропусков/ошибок, накопленный LogError.
+func (r *Reporter) Summary(uniqueSkills int, filePath string) {
+	fmt.Println()
+	fmt.Println(boxTop())
+	fmt.Println(boxLine("  Итоги сбора"))
+	fmt.Println(boxBottom())
+	fmt.Println()
+	fmt.Printf("Город                    : %s\n", r.area.Name)
+	fmt.Printf("Профессий собрано        : %d/%d\n", len(r.completed), r.total)
+	fmt.Printf("Уникальных навыков       : %d\n", uniqueSkills)
+	fmt.Printf("Время сбора              : %s\n", formatDurationLong(time.Since(r.startTime)))
+	fmt.Printf("Ошибок/повторов          : %d\n", r.errorCount())
+	if len(r.zeroResult) > 0 {
+		fmt.Printf("Профессии без результата : %s\n", strings.Join(r.zeroResult, ", "))
+	}
+	fmt.Printf("Файл отчёта              : %s\n", filePath)
+
+	if len(r.errorLog) > 0 {
+		fmt.Println()
+		fmt.Println("Пропуски и ошибки:")
+		for _, e := range r.errorLog {
+			fmt.Printf("  - %s\n", e)
+		}
+	}
 }
 
 func (r *Reporter) errorCount() int {
