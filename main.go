@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const banner = `╔══════════════════════════════════════════════╗
@@ -45,8 +46,8 @@ func main() {
 // collectSkills проходит по фиксированному списку профессий, пропуская уже
 // завершённые (из кэша), собирает счётчики навыков по вакансиям и
 // сохраняет кэш на диск сразу после каждой профессии (см. ТЗ, шаг 4;
-// ADR-0004). Прогресс-бар и итоговая статистика — предмет milestone 5/7,
-// здесь только сбор и чекпоинты.
+// ADR-0004). Ход сбора отображается репортером прогресса (progress.go,
+// milestone 5); детальное логирование ошибок — предмет milestone 7.
 func collectSkills(client *Client, area Area, cache *CacheData, reader *bufio.Scanner) error {
 	if cache == nil {
 		cache = NewCache(area.Name, area.ID)
@@ -57,41 +58,47 @@ func collectSkills(client *Client, area Area, cache *CacheData, reader *bufio.Sc
 		done[p] = true
 	}
 
-	for _, profession := range professions {
+	reporter := NewReporter(area, len(professions), client)
+	for _, profession := range cache.Completed {
+		reporter.AddCompleted(profession, len(cache.Data[profession]))
+	}
+
+	for i, profession := range professions {
 		if done[profession] {
 			continue
 		}
 
-		fmt.Printf("\n=== %s ===\n", profession)
+		reporter.StartProfession(profession, i+1)
+		start := time.Now()
 
 		vacancies, err := client.ListVacancies(profession, area.ID)
 		if err != nil {
-			fmt.Printf("Ошибка получения списка вакансий: %v (профессия пропущена)\n", err)
+			reporter.LogError(fmt.Sprintf("список вакансий %q: %v", profession, err))
 			continue
 		}
-		if len(vacancies) == 0 {
-			fmt.Println("Вакансий не найдено за период.")
-		}
+		reporter.SetVacancyTotal(len(vacancies))
 
 		skills := make(map[string]int)
-		for _, v := range vacancies {
+		for i, v := range vacancies {
 			names, err := client.VacancyKeySkills(v.ID)
 			if err != nil {
-				fmt.Printf("  Пропуск вакансии %s (%s): %v\n", v.ID, v.Name, err)
+				reporter.LogError(fmt.Sprintf("вакансия %s (%s): %v", v.ID, v.Name, err))
+				reporter.VacancyProgress(i+1, len(skills))
 				continue
 			}
 			for _, s := range names {
 				skills[s]++
 			}
+			reporter.VacancyProgress(i+1, len(skills))
 		}
 
 		if err := cache.MarkCompleted(profession, skills); err != nil {
 			return fmt.Errorf("сохранить кэш после %q: %w", profession, err)
 		}
-		fmt.Printf("Собрано навыков: %d уникальных (вакансий: %d)\n", len(skills), len(vacancies))
+		reporter.FinishProfession(profession, len(skills), time.Since(start))
 	}
 
-	fmt.Println("\nСбор данных завершён.")
+	reporter.Done()
 	return nil
 }
 

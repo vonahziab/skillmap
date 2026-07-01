@@ -44,6 +44,9 @@ const (
 // HTML-страницы сайта для списка вакансий и деталей (см. константы выше).
 type Client struct {
 	http *http.Client
+	// Retries — число неудачных попыток запроса с начала работы клиента,
+	// используется репортером прогресса для поля "Ошибок/повторов" (progress.go).
+	Retries int
 }
 
 func NewClient() *Client {
@@ -61,7 +64,8 @@ func NewClient() *Client {
 
 // withRetry — общая retry-обёртка: maxRetries попыток с паузой retryPause
 // между ними, пауза requestPause после каждого запроса независимо от исхода.
-func withRetry(fetchOnce func() ([]byte, error)) ([]byte, error) {
+// Каждая неудачная попытка увеличивает c.Retries (см. progress.go).
+func (c *Client) withRetry(fetchOnce func() ([]byte, error)) ([]byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		body, err := fetchOnce()
@@ -70,6 +74,7 @@ func withRetry(fetchOnce func() ([]byte, error)) ([]byte, error) {
 			return body, nil
 		}
 		lastErr = err
+		c.Retries++
 		if attempt < maxRetries {
 			time.Sleep(retryPause)
 		}
@@ -83,7 +88,7 @@ func (c *Client) getJSON(path string, query url.Values) ([]byte, error) {
 	if len(query) > 0 {
 		reqURL += "?" + query.Encode()
 	}
-	return withRetry(func() ([]byte, error) { return c.doJSONGet(reqURL) })
+	return c.withRetry(func() ([]byte, error) { return c.doJSONGet(reqURL) })
 }
 
 func (c *Client) doJSONGet(reqURL string) ([]byte, error) {
@@ -111,7 +116,7 @@ func (c *Client) doJSONGet(reqURL string) ([]byte, error) {
 }
 
 func (c *Client) getHTML(rawURL string) ([]byte, error) {
-	return withRetry(func() ([]byte, error) { return c.doHTMLFetch(rawURL) })
+	return c.withRetry(func() ([]byte, error) { return c.doHTMLFetch(rawURL) })
 }
 
 // doHTMLFetch запрашивает HTML-страницу сайта с браузерными заголовками,
