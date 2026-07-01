@@ -37,10 +37,17 @@ func main() {
 		cache = nil
 	}
 
-	if err := collectSkills(client, area, cache, reader); err != nil {
+	cache, err = collectSkills(client, area, cache, reader)
+	if err != nil {
 		fmt.Printf("Ошибка сбора данных: %v\n", err)
 		return
 	}
+
+	if err := GenerateExcel(cache, professions); err != nil {
+		fmt.Printf("Ошибка генерации Excel: %v\n", err)
+		return
+	}
+	fmt.Printf("\nФайл сохранён   : %s\n", excelFileName(cache.City))
 }
 
 // collectSkills проходит по фиксированному списку профессий, пропуская уже
@@ -48,7 +55,7 @@ func main() {
 // сохраняет кэш на диск сразу после каждой профессии (см. ТЗ, шаг 4;
 // ADR-0004). Ход сбора отображается репортером прогресса (progress.go,
 // milestone 5); детальное логирование ошибок — предмет milestone 7.
-func collectSkills(client *Client, area Area, cache *CacheData, reader *bufio.Scanner) error {
+func collectSkills(client *Client, area Area, cache *CacheData, reader *bufio.Scanner) (*CacheData, error) {
 	if cache == nil {
 		cache = NewCache(area.Name, area.ID)
 	}
@@ -93,13 +100,13 @@ func collectSkills(client *Client, area Area, cache *CacheData, reader *bufio.Sc
 		}
 
 		if err := cache.MarkCompleted(profession, skills); err != nil {
-			return fmt.Errorf("сохранить кэш после %q: %w", profession, err)
+			return nil, fmt.Errorf("сохранить кэш после %q: %w", profession, err)
 		}
 		reporter.FinishProfession(profession, len(skills), time.Since(start))
 	}
 
 	reporter.Done()
-	return nil
+	return cache, nil
 }
 
 // promptCity запрашивает у пользователя город, пока не будет однозначно
